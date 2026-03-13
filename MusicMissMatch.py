@@ -67,6 +67,17 @@ def _key(section, option):
     except (configparser.NoSectionError, configparser.NoOptionError):
         return ''
 
+def _setting(option, fallback):
+    '''Read a value from [settings] section, casting to the type of fallback.'''
+    try:
+        raw = _cfg.get('settings', option).strip()
+        return type(fallback)(raw)
+    except (configparser.NoSectionError, configparser.NoOptionError):
+        return fallback
+    except (ValueError, TypeError) as e:
+        print(f'[WARNING] keys.ini [settings] {option} is invalid ({e}), using default: {fallback}')
+        return fallback
+
 ACOUSTID_KEY   = _key('acoustid',   'api_key')
 AUDIOTAG_KEY   = _key('audiotag',   'api_key')
 AUDD_KEY       = _key('audd',       'api_key')
@@ -82,18 +93,16 @@ SONGFINDER_URL  = 'https://songfinder-file-recognition.p.rapidapi.com/api/rapida
 # Characters not allowed in Windows filenames
 WINDOWS_INVALID_CHARS = r'[<>:"/\\|?*\x00-\x1f]'
 
-# Similarity threshold (0-100). Results below this go into the candidate pool
-# instead of triggering an immediate rename.
-# 70 = allow reasonable differences (added album, punctuation changes)
-# Lower = more permissive auto-rename, Higher = stricter
-SIMILARITY_THRESHOLD = 70
+# Defaults — overridden by [settings] in keys.ini
+SIMILARITY_THRESHOLD       = _setting('similarity_threshold',       70)
+EARLY_STOP_THRESHOLD       = _setting('early_stop_threshold',       90)
+CONFIRM_TIMEOUT            = _setting('confirm_timeout',            120)
+# 'shorter' = prefer less bloated titles (default)
+# 'longer'  = prefer more complete/detailed titles
+TITLE_LENGTH_PREFERENCE    = _setting('title_length_preference',    'shorter')
 
-# Early-stop threshold. If any engine hits this score, stop immediately —
-# no need to burn API quota on the remaining engines.
-EARLY_STOP_THRESHOLD = 90
-
-# Seconds to wait for user confirmation before auto-skipping.
-CONFIRM_TIMEOUT = 120
+# Engine priority for tiebreaking (lower = more trusted). Not user-configurable.
+ENGINE_PRIORITY = {'AcoustID': 0, 'MusicBrainz': 1, 'AudioTag': 2, 'Shazam': 3, 'AudD': 4, 'SongFinder': 5}
 
 
 def sanitize_filename(name):
@@ -367,7 +376,7 @@ def try_audd(filepath):
 
 
 # --- Engine 6: SongFinder ---
-SONGFINDER_MIN_INTERVAL = 60  # minimum seconds between SongFinder calls
+SONGFINDER_MIN_INTERVAL = _setting('songfinder_min_interval', 60)  # minimum seconds between SongFinder calls
 SONGFINDER_MAX_RETRIES  = 3
 
 _songfinder_last_call = 0.0  # timestamp of the last successful SongFinder request
@@ -643,8 +652,12 @@ def process_directory(directory, mode='stop_when_very_hi'):
                         and normalize(other['artist']) == grp[1]
                         and normalize(other['album'])  == grp[2]
                     )
-                    length = len(r['title']) + len(r['artist']) + len(r['album'])
-                    return (candidate[1], consensus, length)
+                    return (
+                        candidate[1],                                    # 1. similarity (higher=better)
+                        consensus,                                        # 2. consensus  (higher=better)
+                        -ENGINE_PRIORITY.get(r['source'], 99),            # 3. engine priority (lower index=better)
+                        len(r['title']) if TITLE_LENGTH_PREFERENCE == 'longer' else -len(r['title']),  # 4. title length
+                    )
 
                 sort_keys = {id(c): make_sort_key(c) for c in candidates}
                 candidates.sort(key=lambda x: sort_keys[id(x)], reverse=True)
